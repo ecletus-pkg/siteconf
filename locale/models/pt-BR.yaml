@@ -1,0 +1,6 @@
+SiteConfigMain:
+  label*:
+    s: Configurações
+
+  attributes:
+    Title: Título do Site
