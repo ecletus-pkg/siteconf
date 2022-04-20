@@ -14,7 +14,7 @@ import (
 
 	"github.com/ecletus/admin"
 	"github.com/ecletus/core"
-	"github.com/moisespsena-go/aorm"
+	"github.com/go-aorm/aorm"
 )
 
 var log = logging.MustGetLogger(path_helpers.GetCalledDir())
