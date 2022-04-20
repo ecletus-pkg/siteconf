@@ -31,7 +31,7 @@ func GetFieldID(v interface{}) string {
 	}
 }
 
-func fieldEnabled(recorde interface{}, context *admin.Context, meta *admin.Meta) bool {
+func fieldEnabled(_ interface{}, context *admin.Context, meta *admin.Meta, _ bool) bool {
 	return GetFieldID(meta) == context.ResourceID.String()
 }
 
@@ -59,8 +59,9 @@ func (this FieldOptions) New() *admin.Meta {
 	this.Meta.Valuer = func(recorde interface{}, context *core.Context) interface{} {
 		return this.Getter(context, recorde.(*SiteConfig).Value)
 	}
-	this.Meta.FormattedValuer = func(recorde interface{}, context *core.Context) interface{} {
-		return this.FormattedGetter(context, this.Getter(context, recorde.(*SiteConfig).Value))
+	this.Meta.FormattedValuer = func(record interface{}, context *core.Context) *admin.FormattedValue {
+		v := this.Getter(context, record.(*SiteConfig).Value)
+		return &admin.FormattedValue{Record: record, Raw: v, Value: this.FormattedGetter(context, v)}
 	}
 	return this.Meta
 }

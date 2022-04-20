@@ -2,16 +2,19 @@ package siteconf
 
 import (
 	"fmt"
+	"strings"
 
 	admin_plugin "github.com/ecletus-pkg/admin"
-	"github.com/ecletus/admin"
-	"github.com/ecletus/core"
 	"github.com/ecletus/db"
 	"github.com/ecletus/plug"
 	"github.com/ecletus/roles"
-	"github.com/moisespsena-go/aorm"
 	path_helpers "github.com/moisespsena-go/path-helpers"
 	"github.com/op/go-logging"
+	"gopkg.in/mgo.v2/bson"
+
+	"github.com/ecletus/admin"
+	"github.com/ecletus/core"
+	"github.com/moisespsena-go/aorm"
 )
 
 var log = logging.MustGetLogger(path_helpers.GetCalledDir())
@@ -33,6 +36,10 @@ func (p *Plugin) Before() []string {
 	return []string{p.SitesLoaderUID}
 }
 
+func (p *Plugin) After() []string {
+	return []string{}
+}
+
 func (p *Plugin) OnRegister(options *plug.Options) {
 	admin_plugin.Events(p).InitResources(func(e *admin_plugin.AdminEvent) {
 		if p.res != nil {
@@ -42,10 +49,12 @@ func (p *Plugin) OnRegister(options *plug.Options) {
 			Singleton:  true,
 			Virtual:    true,
 			Permission: roles.AllowAny(admin.ROLE),
+			Menu:       admin.MenuConfig,
+			Param:      admin.ConfigParam + "/site",
 			Setup: func(res *admin.Resource) {
-				menu := res.DefaultMenu()
-				menu.MdlIcon = "settings"
-				menu.Priority = -1
+				// menu := res.DefaultMenu()
+				// menu.MdlIcon = "settings"
+				// menu.Priority = -1
 			},
 		})
 	})
@@ -57,7 +66,7 @@ func (p *Plugin) OnRegister(options *plug.Options) {
 
 func (p *Plugin) Init(options *plug.Options) {
 	register := options.GetInterface(p.SitesRegisterKey).(*core.SitesRegister)
-	register.SiteConfigGetter.Append(core.NewSiteGetter(func(site *core.Site, key interface{}) (value interface{}, ok bool) {
+	get := func(site *core.Site, key interface{}) (value interface{}, ok bool) {
 		if key, ok := key.(PrivateName); ok {
 			var config SiteConfig
 			if err := site.GetSystemDB().DB.First(&config, "id = ?", string(key)).Error; err == nil || aorm.IsRecordNotFoundError(err) {
@@ -68,8 +77,22 @@ func (p *Plugin) Init(options *plug.Options) {
 			}
 		}
 		return
+	}
+	register.SiteConfigGetter.Append(core.NewSiteGetter(get, func(site *core.Site, key, dest interface{}) (ok bool) {
+		var v interface{}
+		if v, ok = get(site, key); !ok {
+			return
+		}
+		s := v.(string)
+		if s == "" {
+			return
+		}
+		if err := bson.UnmarshalJSON([]byte(s), dest); err != nil {
+			log.Errorf("unmarshal config for site %s into %T failed: %v", site.Name(), dest, err)
+		}
+		return
 	}))
-	register.SiteConfigSetterFactory = &privateSiteConfigSetterFactory{}
+	register.SetSiteConfigSetterFactory(&privateSiteConfigSetterFactory{})
 }
 
 func Private(site *core.Site, key interface{}) (v string, ok bool) {
@@ -103,12 +126,51 @@ func (this PrivateName) Concat(sub string) PrivateName {
 }
 
 type privateSiteConfigSetterFactory struct {
+	FactoryCallbacks []*core.SiteFactoryCallback
+	sites            []*core.Site
 }
 
-func (this privateSiteConfigSetterFactory) Factory(site *core.Site) (setter core.ConfigSetter) {
-	return core.ConfigSetterFunc(func(key, value interface{}) (err error) {
-		return SetPrivate(site, key, value)
-	})
+func (this *privateSiteConfigSetterFactory) FactoryCallback(cb ...*core.SiteFactoryCallback) {
+	this.FactoryCallbacks = append(this.FactoryCallbacks, cb...)
+
+	for _, site := range this.sites {
+		for _, cb := range cb {
+			if cb.Setup != nil {
+				cb.Setup(site, site.ConfigSetter())
+			}
+		}
+	}
+}
+
+func (this *privateSiteConfigSetterFactory) Factory(site *core.Site) (setter core.ConfigSetter) {
+	setter = &core.DefaultConfigSetter{
+		func(key, value interface{}) (err error) {
+			return SetPrivate(site, key, value)
+		},
+		func() {
+			defer func() {
+				site = nil
+			}()
+
+			for i, s := range this.sites {
+				if s == site {
+					this.sites = append(this.sites[0:i], this.sites[i+1:]...)
+				}
+			}
+			for _, cb := range this.FactoryCallbacks {
+				if cb.Destroy != nil {
+					cb.Destroy(site)
+				}
+			}
+		},
+	}
+	for _, cb := range this.FactoryCallbacks {
+		if cb.Setup != nil {
+			cb.Setup(site, setter)
+		}
+	}
+	this.sites = append(this.sites, site)
+	return
 }
 
 func SetPrivate(site *core.Site, key, value interface{}) (err error) {
@@ -124,21 +186,19 @@ func SetPrivate(site *core.Site, key, value interface{}) (err error) {
 		k = PrivateConfName(key)
 	}
 	cfg := &SiteConfig{
-		string(k),
-		fmt.Sprint(value),
+		ID: string(k),
 	}
+	var b []byte
+	if b, err = bson.MarshalJSON(value); err != nil {
+		return
+	}
+	cfg.Value = strings.TrimSpace(string(b))
 	DB := site.GetSystemDB().DB.Model(&cfg)
 
-	if db2 := DB.Update(cfg); err == nil && db2.RowsAffected == 1 {
+	if err = DB.Save(cfg).Error; err != nil {
+		log.Errorf("set private config %q for site %s failed: %v", k, site.Name(), err)
 		return
-	} else if err != nil {
-		err = db2.Error
-	} else if db2.RowsAffected == 0 {
-		if err = DB.Create(cfg).Error; err == nil {
-			return
-		}
 	}
-	log.Errorf("set private config %q for site %s failed: %v", k, site.Name(), err)
 	return
 }
 
